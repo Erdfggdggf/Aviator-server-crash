@@ -11,9 +11,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Serve static files from the public directory
-app.use(express.static(path.join(__dirname, 'public')));
-
 const PORT = process.env.PORT || 3000;
 
 /* =========================
@@ -47,19 +44,9 @@ pool.connect()
           message TEXT NOT NULL,
           is_admin BOOLEAN DEFAULT FALSE,
           type VARCHAR(20) DEFAULT 'text',
-          reply_to_username VARCHAR(50),
-          reply_to_message TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
         )
       `);
-      
-      await pool.query(`
-        ALTER TABLE chats ADD COLUMN IF NOT EXISTS reply_to_username VARCHAR(50);
-      `).catch(e => {});
-
-      await pool.query(`
-        ALTER TABLE chats ADD COLUMN IF NOT EXISTS reply_to_message TEXT;
-      `).catch(e => {});
       
       await pool.query(`
         CREATE TABLE IF NOT EXISTS cashrains (
@@ -115,8 +102,7 @@ pool.connect()
   function maskUsername(username) {
     if(!username) return "anon";
     if(username.length <= 2) return username + "**";
-    const mid = "*".repeat(username.length - 2);
-    return username.charAt(0) + mid + username.charAt(username.length - 1);
+    return username.charAt(0) + "**" + username.charAt(username.length - 1);
   }
 
   const spamRegex = /(?:07\d{8}|2547\d{8}|01\d{8}|\+254\d{9})/;
@@ -176,8 +162,6 @@ function formatPhone(phone) {
           message: m.message,
           is_admin: m.is_admin,
           type: m.type,
-          reply_to_username: m.reply_to_username,
-          reply_to_message: m.reply_to_message,
           amount: m.amount,
           max_claims: m.max_claims,
           current_claims: m.current_claims,
@@ -227,11 +211,9 @@ function formatPhone(phone) {
       recent.push(now);
       chatRateLimits.set(formattedPhone, recent);
       
-      const { replyToUsername, replyToMessage } = req.body;
-      
       await pool.query(
-        "INSERT INTO chats (username, message, type, reply_to_username, reply_to_message) VALUES ($1, $2, 'text', $3, $4)",
-        [user.rows[0].username, message, replyToUsername || null, replyToMessage || null]
+        "INSERT INTO chats (username, message, type) VALUES ($1, $2, 'text')",
+        [user.rows[0].username, message]
       );
       
       res.json({ success: true });
@@ -294,15 +276,15 @@ function formatPhone(phone) {
   /* ADMIN CHAT ROUTES */
   app.post('/admin/chat/send', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
     
-    const { message, replyToUsername, replyToMessage } = req.body;
+    const { message } = req.body;
     if(!message) return res.status(400).json({error: 'Message required'});
     
     try {
       await pool.query(
-        "INSERT INTO chats (username, message, is_admin, type, reply_to_username, reply_to_message) VALUES ('captain', $1, TRUE, 'text', $2, $3)",
-        [message, replyToUsername || null, replyToMessage || null]
+        "INSERT INTO chats (username, message, is_admin, type) VALUES ('captain', $1, TRUE, 'text')",
+        [message]
       );
       res.json({ success: true });
     } catch(e) { res.status(500).json({error: 'Server error'}); }
@@ -310,7 +292,7 @@ function formatPhone(phone) {
 
   app.post('/admin/chat/delete', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
     
     const { chatId } = req.body;
     try {
@@ -322,7 +304,7 @@ function formatPhone(phone) {
 
   app.post('/admin/chat/toggle-lock', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
     
     try {
       const lockCheck = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'chat_locked'");
@@ -336,7 +318,7 @@ function formatPhone(phone) {
 
   app.post('/admin/chat/suspend-user', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
     
     const { username } = req.body;
     try {
@@ -348,7 +330,7 @@ function formatPhone(phone) {
 
   app.post('/admin/chat/cashrain', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
     
     const { amount, max_claims, min_balance } = req.body;
     try {
