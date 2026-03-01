@@ -188,7 +188,7 @@ function formatPhone(phone) {
   });
 
   app.post('/chat/send', async (req, res) => {
-    const { phone, message, replyToId } = req.body;
+    const { phone, message } = req.body;
     if(!phone || !message) return res.status(400).json({error: 'Invalid request'});
     
     const formattedPhone = formatPhone(phone);
@@ -224,8 +224,8 @@ function formatPhone(phone) {
       chatRateLimits.set(formattedPhone, recent);
       
       await pool.query(
-        "INSERT INTO chats (username, message, type, reply_to_id) VALUES ($1, $2, 'text', $3)",
-        [user.rows[0].username, message, replyToId || null]
+        "INSERT INTO chats (username, message, type) VALUES ($1, $2, 'text')",
+        [user.rows[0].username, message]
       );
       
       res.json({ success: true });
