@@ -11,6 +11,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Serve static files from the public directory
+app.use(express.static(path.join(__dirname, 'public')));
+
 const PORT = process.env.PORT || 3000;
 
 /* =========================
@@ -102,7 +105,8 @@ pool.connect()
   function maskUsername(username) {
     if(!username) return "anon";
     if(username.length <= 2) return username + "**";
-    return username.charAt(0) + "**" + username.charAt(username.length - 1);
+    const mid = "*".repeat(username.length - 2);
+    return username.charAt(0) + mid + username.charAt(username.length - 1);
   }
 
   const spamRegex = /(?:07\d{8}|2547\d{8}|01\d{8}|\+254\d{9})/;
@@ -276,7 +280,7 @@ function formatPhone(phone) {
   /* ADMIN CHAT ROUTES */
   app.post('/admin/chat/send', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
     
     const { message } = req.body;
     if(!message) return res.status(400).json({error: 'Message required'});
@@ -292,7 +296,7 @@ function formatPhone(phone) {
 
   app.post('/admin/chat/delete', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
     
     const { chatId } = req.body;
     try {
@@ -304,7 +308,7 @@ function formatPhone(phone) {
 
   app.post('/admin/chat/toggle-lock', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
     
     try {
       const lockCheck = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'chat_locked'");
@@ -318,7 +322,7 @@ function formatPhone(phone) {
 
   app.post('/admin/chat/suspend-user', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
     
     const { username } = req.body;
     try {
@@ -330,7 +334,7 @@ function formatPhone(phone) {
 
   app.post('/admin/chat/cashrain', async (req, res) => {
     const adminPwd = req.headers.authorization;
-    if (adminPwd !== "519156") return res.status(403).json({ error: "Unauthorized" });
+    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
     
     const { amount, max_claims, min_balance } = req.body;
     try {
