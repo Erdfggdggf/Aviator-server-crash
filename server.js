@@ -78,6 +78,10 @@ pool.connect()
         ALTER TABLE users ADD COLUMN IF NOT EXISTS chat_status VARCHAR(20) DEFAULT 'active';
       `).catch(e => console.log('Column chat_status exists'));
 
+      await pool.query(`
+        ALTER TABLE chats ADD COLUMN IF NOT EXISTS reply_to_id INTEGER;
+      `).catch(e => console.log('Column reply_to_id exists'));
+
       // Settings table for chat lock
       await pool.query(`
         CREATE TABLE IF NOT EXISTS settings (
@@ -153,9 +157,11 @@ function formatPhone(phone) {
       
       // Fetch last 50 messages
       const msgs = await pool.query(`
-        SELECT c.*, cr.amount, cr.max_claims, cr.current_claims 
+        SELECT c.*, cr.amount, cr.max_claims, cr.current_claims,
+               r.username AS reply_username, r.message AS reply_message
         FROM chats c
         LEFT JOIN cashrains cr ON cr.chat_id = c.id
+        LEFT JOIN chats r ON c.reply_to_id = r.id
         ORDER BY c.created_at DESC LIMIT 50
       `);
       
@@ -169,7 +175,9 @@ function formatPhone(phone) {
           amount: m.amount,
           max_claims: m.max_claims,
           current_claims: m.current_claims,
-          created_at: m.created_at
+          created_at: m.created_at,
+          reply_username: m.reply_username ? maskUsername(m.reply_username) : null,
+          reply_message: m.reply_message
         };
       });
       
@@ -180,7 +188,7 @@ function formatPhone(phone) {
   });
 
   app.post('/chat/send', async (req, res) => {
-    const { phone, message } = req.body;
+    const { phone, message, replyToId } = req.body;
     if(!phone || !message) return res.status(400).json({error: 'Invalid request'});
     
     const formattedPhone = formatPhone(phone);
@@ -216,8 +224,8 @@ function formatPhone(phone) {
       chatRateLimits.set(formattedPhone, recent);
       
       await pool.query(
-        "INSERT INTO chats (username, message, type) VALUES ($1, $2, 'text')",
-        [user.rows[0].username, message]
+        "INSERT INTO chats (username, message, type, reply_to_id) VALUES ($1, $2, 'text', $3)",
+        [user.rows[0].username, message, replyToId || null]
       );
       
       res.json({ success: true });
@@ -282,13 +290,13 @@ function formatPhone(phone) {
     const adminPwd = req.headers.authorization;
     if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
     
-    const { message } = req.body;
+    const { message, replyToId } = req.body;
     if(!message) return res.status(400).json({error: 'Message required'});
     
     try {
       await pool.query(
-        "INSERT INTO chats (username, message, is_admin, type) VALUES ('captain', $1, TRUE, 'text')",
-        [message]
+        "INSERT INTO chats (username, message, is_admin, type, reply_to_id) VALUES ('captain', $1, TRUE, 'text', $2)",
+        [message, replyToId || null]
       );
       res.json({ success: true });
     } catch(e) { res.status(500).json({error: 'Server error'}); }
