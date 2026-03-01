@@ -47,9 +47,19 @@ pool.connect()
           message TEXT NOT NULL,
           is_admin BOOLEAN DEFAULT FALSE,
           type VARCHAR(20) DEFAULT 'text',
+          reply_to_username VARCHAR(50),
+          reply_to_message TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
         )
       `);
+      
+      await pool.query(`
+        ALTER TABLE chats ADD COLUMN IF NOT EXISTS reply_to_username VARCHAR(50);
+      `).catch(e => {});
+
+      await pool.query(`
+        ALTER TABLE chats ADD COLUMN IF NOT EXISTS reply_to_message TEXT;
+      `).catch(e => {});
       
       await pool.query(`
         CREATE TABLE IF NOT EXISTS cashrains (
@@ -166,6 +176,8 @@ function formatPhone(phone) {
           message: m.message,
           is_admin: m.is_admin,
           type: m.type,
+          reply_to_username: m.reply_to_username,
+          reply_to_message: m.reply_to_message,
           amount: m.amount,
           max_claims: m.max_claims,
           current_claims: m.current_claims,
@@ -215,9 +227,11 @@ function formatPhone(phone) {
       recent.push(now);
       chatRateLimits.set(formattedPhone, recent);
       
+      const { replyToUsername, replyToMessage } = req.body;
+      
       await pool.query(
-        "INSERT INTO chats (username, message, type) VALUES ($1, $2, 'text')",
-        [user.rows[0].username, message]
+        "INSERT INTO chats (username, message, type, reply_to_username, reply_to_message) VALUES ($1, $2, 'text', $3, $4)",
+        [user.rows[0].username, message, replyToUsername || null, replyToMessage || null]
       );
       
       res.json({ success: true });
@@ -282,13 +296,13 @@ function formatPhone(phone) {
     const adminPwd = req.headers.authorization;
     if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
     
-    const { message } = req.body;
+    const { message, replyToUsername, replyToMessage } = req.body;
     if(!message) return res.status(400).json({error: 'Message required'});
     
     try {
       await pool.query(
-        "INSERT INTO chats (username, message, is_admin, type) VALUES ('captain', $1, TRUE, 'text')",
-        [message]
+        "INSERT INTO chats (username, message, is_admin, type, reply_to_username, reply_to_message) VALUES ('captain', $1, TRUE, 'text', $2, $3)",
+        [message, replyToUsername || null, replyToMessage || null]
       );
       res.json({ success: true });
     } catch(e) { res.status(500).json({error: 'Server error'}); }
