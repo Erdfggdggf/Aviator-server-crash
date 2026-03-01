@@ -11,6 +11,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Serve static files from the public directory
+app.use(express.static(path.join(__dirname, 'public')));
+
 const PORT = process.env.PORT || 3000;
 
 /* =========================
@@ -102,7 +105,8 @@ pool.connect()
   function maskUsername(username) {
     if(!username) return "anon";
     if(username.length <= 2) return username + "**";
-    return username.charAt(0) + "**" + username.charAt(username.length - 1);
+    const mid = "*".repeat(username.length - 2);
+    return username.charAt(0) + mid + username.charAt(username.length - 1);
   }
 
   const spamRegex = /(?:07\d{8}|2547\d{8}|01\d{8}|\+254\d{9})/;
