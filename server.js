@@ -1210,6 +1210,12 @@ let activeBets = [];
 let pendingBets = [];
 
 let cachedUsernames = ['johndoe', 'maryjane', 'alex2024', 'bettor99', 'luckykenya', 'nairobian', 'swiftbet', 'hustler', 'pambana', 'winner'];
+const fakeRandomUsernames = [
+  "d****g", "9***5", "f**l", "5**j", "kt**", "82**", "m**q", "3***x", "r***9", "t**v",
+  "1*7", "z**f", "4***p", "n****3", "b**h", "6**y", "c***8", "w***r", "2***m", "g***4",
+  "p***z", "7***k", "h***1", "q***6", "v**n", "0****d", "x***5", "ls**", "9***f", "j**2",
+  "s**8", "e**w", "5*c"
+];
 async function refreshUsernames() {
   try {
     const res = await pool.query('SELECT username FROM users LIMIT 100');
@@ -1239,11 +1245,10 @@ function generateFakeBets() {
     if (localForced.length > 0) {
        name = localForced.shift();
     } else {
-       name = cachedUsernames[Math.floor(Math.random() * cachedUsernames.length)];
-       if (Math.random() > 0.5) isReversed = true;
+       name = fakeRandomUsernames[Math.floor(Math.random() * fakeRandomUsernames.length)];
     }
     
-    if (isReversed && name) name = name.split('').reverse().join('');
+    if (isReversed && name && !name.includes('*')) name = name.split('').reverse().join('');
     if (!name) name = "player";
     
     let amount;
@@ -1263,7 +1268,7 @@ function generateFakeBets() {
 
     fakeBets.push({
       id: 'fake_' + Date.now() + '_' + i,
-      username: maskUsername(name),
+      username: name && name.includes('*') ? name : maskUsername(name),
       amount: parseFloat(amount.toFixed(2)),
       plannedCashout: cashout,
       cashedOut: false,
