@@ -11,10 +11,26 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Serve static files from the public directory
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files from the root directory
+app.use(express.static(__dirname));
 
-const PORT = process.env.PORT || 3000;
+// API routes and other middleware...
+// (Make sure this is placed AFTER your API/Admin routes but BEFORE the catch-all)
+
+// Catch-all route to serve index.html for SPA routing
+app.get('*', (req, res, next) => {
+  // If it's an API or Admin route, don't serve index.html, let it 404 or be handled
+  if (req.path.startsWith('/api') || req.path.startsWith('/chat') || req.path.startsWith('/admin')) {
+    return next();
+  }
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// The port MUST be exactly what Replit expects or it won't be accessible
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
 
 /* =========================
    DATABASE CONNECTION
@@ -40,75 +56,122 @@ pool.connect()
 
   async function setupChatDB() {
     try {
+      // 1. Users Table
       await pool.query(`
-        CREATE TABLE IF NOT EXISTS chats (
-          id SERIAL PRIMARY KEY,
-          username VARCHAR(50),
-          message TEXT NOT NULL,
-          is_admin BOOLEAN DEFAULT FALSE,
-          type VARCHAR(20) DEFAULT 'text',
-          reply_to INTEGER DEFAULT NULL,
-          likes INTEGER DEFAULT 0,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
-        )
-      `);
-      
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS chat_likes (
-          id SERIAL PRIMARY KEY,
-          chat_id INTEGER NOT NULL,
-          username VARCHAR(50) NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
-        )
-      `);
-      
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS cashrains (
-          id SERIAL PRIMARY KEY,
-          chat_id INTEGER,
-          amount DECIMAL(15,2) NOT NULL,
-          max_claims INTEGER NOT NULL,
-          current_claims INTEGER DEFAULT 0,
-          min_balance DECIMAL(15,2) DEFAULT 50.00,
-          active BOOLEAN DEFAULT TRUE,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
-        )
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(50) UNIQUE NOT NULL,
+            phone VARCHAR(20) UNIQUE NOT NULL,
+            pin VARCHAR(10) NOT NULL,
+            balance DECIMAL(15, 2) DEFAULT 0.00,
+            status VARCHAR(20) DEFAULT 'active',
+            chat_status VARCHAR(20) DEFAULT 'active',
+            referral_code VARCHAR(50), 
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
       `);
 
+      // 2. Bets Table
       await pool.query(`
-        CREATE TABLE IF NOT EXISTS cashrain_claims (
-          id SERIAL PRIMARY KEY,
-          cashrain_id INTEGER NOT NULL,
-          username VARCHAR(50) NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
-        )
+        CREATE TABLE IF NOT EXISTS bets (
+            id SERIAL PRIMARY KEY,
+            phone VARCHAR(20) NOT NULL,
+            amount DECIMAL(15, 2) NOT NULL,
+            multiplier DECIMAL(10, 2),
+            status VARCHAR(20) NOT NULL DEFAULT 'placed',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
       `);
-      
-      // Add chat_status to users if not exists
-      await pool.query(`
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS chat_status VARCHAR(20) DEFAULT 'active';
-      `).catch(e => console.log('Column chat_status exists'));
 
-      // Settings table for chat lock
+      // 3. Transactions Table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS transactions (
+            id SERIAL PRIMARY KEY,
+            phone VARCHAR(20) NOT NULL,
+            amount DECIMAL(15, 2) NOT NULL,
+            type VARCHAR(30) NOT NULL, 
+            reference VARCHAR(100),
+            status VARCHAR(20) NOT NULL DEFAULT 'success',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
+      `);
+
+      // 4. Notifications Table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS notifications (
+            id SERIAL PRIMARY KEY,
+            phone VARCHAR(20) NOT NULL,
+            message TEXT NOT NULL,
+            is_read BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
+      `);
+
+      // 5. Settings Table
       await pool.query(`
         CREATE TABLE IF NOT EXISTS settings (
-          setting_key VARCHAR(50) PRIMARY KEY,
-          setting_value TEXT
-        )
+            setting_key VARCHAR(50) PRIMARY KEY,
+            setting_value TEXT
+        );
       `);
-      
-      // Insert default chat lock state
+
+      // 6. Chats Table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS chats (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(50),
+            message TEXT NOT NULL,
+            is_admin BOOLEAN DEFAULT FALSE,
+            type VARCHAR(20) DEFAULT 'text',
+            reply_to INTEGER DEFAULT NULL,
+            likes INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
+      `);
+
+      // 7. Chat Likes Table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS chat_likes (
+            id SERIAL PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            username VARCHAR(50) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
+      `);
+
+      // 8. Cashrains Table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS cashrains (
+            id SERIAL PRIMARY KEY,
+            chat_id INTEGER,
+            amount DECIMAL(15,2) NOT NULL,
+            max_claims INTEGER NOT NULL,
+            current_claims INTEGER DEFAULT 0,
+            min_balance DECIMAL(15,2) DEFAULT 50.00,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
+      `);
+
+      // 9. Cashrain Claims Table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS cashrain_claims (
+            id SERIAL PRIMARY KEY,
+            cashrain_id INTEGER NOT NULL,
+            username VARCHAR(50) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
+      `);
+
+      // Insert Default Settings
       await pool.query(`
         INSERT INTO settings (setting_key, setting_value) 
         VALUES ('chat_locked', 'false') 
         ON CONFLICT (setting_key) DO NOTHING;
       `);
 
-      // Ensure database time defaults correctly (if changing existing)
-      // We already use AT TIME ZONE in our queries to be safe.
-
     } catch(e) {
-      console.error("Error setting up chat DB:", e);
+      console.error("Error setting up DB schema:", e);
     }
   }
   setupChatDB();
@@ -243,12 +306,17 @@ function formatPhone(phone) {
 
   
 app.post('/chat/like', async (req, res) => {
-  const { phone, chatId } = req.body;
-  const formattedPhone = formatPhone(phone);
+  const { phone, chatId, isAdmin } = req.body;
   try {
-    const user = await pool.query("SELECT username FROM users WHERE phone = $1", [formattedPhone]);
-    if(user.rows.length === 0) return res.status(404).json({error: 'User not found'});
-    const username = user.rows[0].username;
+    let username;
+    if (isAdmin && req.headers['authorization'] === '3462Abel@#') {
+      username = 'captain';
+    } else {
+      const formattedPhone = formatPhone(phone);
+      const user = await pool.query("SELECT username FROM users WHERE phone = $1", [formattedPhone]);
+      if(user.rows.length === 0) return res.status(404).json({error: 'User not found'});
+      username = user.rows[0].username;
+    }
 
     const checkLike = await pool.query("SELECT * FROM chat_likes WHERE chat_id = $1 AND username = $2", [chatId, username]);
     if (checkLike.rows.length > 0) {
@@ -1467,6 +1535,5 @@ app.get("/receipt/:reference/pdf", (req, res) => {
   doc.end();
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Unified Server running on port ${PORT}`);
-});
+// REMOVED DUPLICATE LISTEN CALL HERE
+
