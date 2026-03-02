@@ -784,7 +784,7 @@ app.post('/bet', async (req, res) => {
     );
 
     const betId = insertResult.rows[0].id;
-    const betObj = { id: betId, phone: formattedPhone, amount: betAmount, autoCashout: autoCashout ? parseFloat(autoCashout) : null, cashedOut: false };
+    const betObj = { id: betId, phone: formattedPhone, username: user.rows[0].username, amount: betAmount, autoCashout: autoCashout ? parseFloat(autoCashout) : null, cashedOut: false };
     
     // All new bets go to pendingBets and will be deducted & activated when the next round starts
     pendingBets.push(betObj);
@@ -1052,6 +1052,19 @@ app.post('/admin/users/adjust-by-phone', async (req, res) => {
   }
 });
 
+app.post('/admin/set-fake-users', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  
+  const { usernames } = req.body;
+  if (Array.isArray(usernames)) {
+     forcedFakeUsers = usernames;
+     res.json({success: true});
+  } else {
+     res.status(400).json({error: 'Invalid data format'});
+  }
+});
+
 app.get('/admin/transactions', async (req, res) => {
   const pwd = req.headers['authorization'];
   if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
@@ -1196,6 +1209,72 @@ let oddsHistory = [];
 let activeBets = [];
 let pendingBets = [];
 
+let cachedUsernames = ['johndoe', 'maryjane', 'alex2024', 'bettor99', 'luckykenya', 'nairobian', 'swiftbet', 'hustler', 'pambana', 'winner'];
+async function refreshUsernames() {
+  try {
+    const res = await pool.query('SELECT username FROM users LIMIT 100');
+    if(res.rows.length > 0) {
+      cachedUsernames = res.rows.map(r => r.username);
+    }
+  } catch(e){}
+}
+setTimeout(refreshUsernames, 5000);
+setInterval(refreshUsernames, 60000 * 10);
+
+let fakeActiveBets = [];
+let forcedFakeUsers = [];
+
+function generateFakeBets() {
+  const fakeBets = [];
+  const numFake = 30;
+  
+  // Use forced users first, then reset
+  let localForced = [...forcedFakeUsers];
+  forcedFakeUsers = []; 
+  
+  for(let i=0; i<numFake; i++) {
+    let name;
+    let isReversed = false;
+    
+    if (localForced.length > 0) {
+       name = localForced.shift();
+    } else {
+       name = cachedUsernames[Math.floor(Math.random() * cachedUsernames.length)];
+       if (Math.random() > 0.5) isReversed = true;
+    }
+    
+    if (isReversed && name) name = name.split('').reverse().join('');
+    if (!name) name = "player";
+    
+    let amount;
+    const randAmt = Math.random();
+    if (randAmt < 0.5) amount = Math.floor(Math.random() * 900) + 100;
+    else if (randAmt < 0.8) amount = Math.floor(Math.random() * 4000) + 1000;
+    else amount = Math.floor(Math.random() * 15000) + 5000;
+
+    let cashout = null;
+    if (Math.random() > 0.3) {
+      const rand = Math.random();
+      if (rand < 0.5) cashout = 1.01 + Math.random() * 1.5;
+      else if (rand < 0.8) cashout = 1.5 + Math.random() * 3.5;
+      else cashout = 5.0 + Math.random() * 15.0;
+      cashout = parseFloat(cashout.toFixed(2));
+    }
+
+    fakeBets.push({
+      id: 'fake_' + Date.now() + '_' + i,
+      username: maskUsername(name),
+      amount: parseFloat(amount.toFixed(2)),
+      plannedCashout: cashout,
+      cashedOut: false,
+      multiplier: null,
+      winAmount: null,
+      isFake: true
+    });
+  }
+  return fakeBets;
+}
+
 app.get('/api/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -1212,6 +1291,46 @@ app.get('/api/stream', (req, res) => {
 });
 
 function broadcast(data) {
+  // Merge fakeBets with activeBets for the UI
+  let allBets = [...activeBets];
+  
+  // During RUNNING, only send non-cashed out fake bets and ones that cashed out
+  // But wait, the client expects `activeBets` in the payload?
+  // Let's just send activeBets: [...activeBets, ...fakeActiveBets]
+  // We should process fakeBets cashedOut status within the gameLoop.
+
+  if(data.status === 'RUNNING' || data.status === 'CRASHED' || data.status === 'WAITING') {
+      const displayBets = allBets.map(b => {
+          let uName = b.isFake ? b.username : "Player";
+          if (!b.isFake) {
+             // For real bets, we need the username if possible. 
+             // We'll map it on the client or here if we joined it, but let's just mask their phone or if we have username.
+             uName = b.username ? maskUsername(b.username) : maskUsername(b.phone.substring(b.phone.length - 4));
+          }
+          return {
+             id: b.id,
+             username: uName,
+             amount: b.amount,
+             cashedOut: b.cashedOut,
+             multiplier: b.multiplier || (b.cashedOut ? b.plannedCashout : null),
+             winAmount: b.winAmount || (b.cashedOut ? (b.amount * (b.multiplier || b.plannedCashout)) : null)
+          };
+      });
+      data.activeBets = displayBets;
+      
+      let allCombined = [...displayBets];
+      if (fakeActiveBets && fakeActiveBets.length > 0) {
+         data.activeBets = [...displayBets, ...fakeActiveBets.map(b => ({
+             id: b.id,
+             username: b.username,
+             amount: b.amount,
+             cashedOut: b.cashedOut,
+             multiplier: b.multiplier,
+             winAmount: b.winAmount
+         }))];
+      }
+  }
+
   const msg = `data: ${JSON.stringify(data)}\n\n`;
   clients.forEach(c => c.write(msg));
 }
@@ -1269,6 +1388,7 @@ async function getNextCrashPoint() {
 async function runGameLoop() {
    gameStatus = 'WAITING';
    currentMultiplier = 1.00;
+   fakeActiveBets = []; // Clear fake bets during waiting
    broadcast({ status: 'WAITING', time: 6, history: oddsHistory });
    
    let waitTime = 6;
@@ -1306,6 +1426,7 @@ async function runGameLoop() {
    
    gameStatus = 'RUNNING';
    currentCrashPoint = await getNextCrashPoint();
+   fakeActiveBets = generateFakeBets(); // Generate new fake bets for this round
    
    let startTime = Date.now();
    
@@ -1327,6 +1448,15 @@ async function runGameLoop() {
          }
       });
 
+      // Fake bets cashout check
+      fakeActiveBets.forEach(bet => {
+         if (!bet.cashedOut && bet.plannedCashout && currentMultiplier >= bet.plannedCashout) {
+            bet.cashedOut = true;
+            bet.multiplier = bet.plannedCashout;
+            bet.winAmount = parseFloat((bet.amount * bet.plannedCashout).toFixed(2));
+         }
+      });
+
       if (currentMultiplier >= currentCrashPoint) {
          clearInterval(gameInterval);
          currentMultiplier = currentCrashPoint;
@@ -1340,14 +1470,15 @@ async function runGameLoop() {
              }
          } catch(e) {}
          
-         // Bets that were placed during the RUNNING phase are already in pendingBets
-         // They will be processed and deducted at the start of the next runGameLoop
-         activeBets = [];
-
+         // Active bets are cleared after broadcasting so the final payload has them
+         const finalData = { status: 'CRASHED', multiplier: currentMultiplier, history: oddsHistory };
+         
          oddsHistory.unshift(currentCrashPoint.toFixed(2));
          if(oddsHistory.length > 15) oddsHistory.pop();
          
-         broadcast({ status: 'CRASHED', multiplier: currentMultiplier, history: oddsHistory });
+         broadcast(finalData);
+         
+         activeBets = [];
          
          setTimeout(() => {
             runGameLoop();
