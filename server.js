@@ -47,6 +47,17 @@ pool.connect()
           message TEXT NOT NULL,
           is_admin BOOLEAN DEFAULT FALSE,
           type VARCHAR(20) DEFAULT 'text',
+          reply_to INTEGER DEFAULT NULL,
+          likes INTEGER DEFAULT 0,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        )
+      `);
+      
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS chat_likes (
+          id SERIAL PRIMARY KEY,
+          chat_id INTEGER NOT NULL,
+          username VARCHAR(50) NOT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
         )
       `);
@@ -156,7 +167,7 @@ function formatPhone(phone) {
         SELECT c.*, cr.amount, cr.max_claims, cr.current_claims 
         FROM chats c
         LEFT JOIN cashrains cr ON cr.chat_id = c.id
-        ORDER BY c.created_at DESC LIMIT 50
+        ORDER BY c.created_at DESC LIMIT 150
       `);
       
       const formatted = msgs.rows.map(m => {
@@ -169,7 +180,11 @@ function formatPhone(phone) {
           amount: m.amount,
           max_claims: m.max_claims,
           current_claims: m.current_claims,
-          created_at: m.created_at
+          created_at: m.created_at,
+          likes: m.likes || 0,
+          reply_to: m.reply_to,
+          likes: m.likes || 0,
+          reply_to: m.reply_to
         };
       });
       
@@ -226,7 +241,128 @@ function formatPhone(phone) {
     }
   });
 
-  app.post('/chat/claim-rain', async (req, res) => {
+  
+app.post('/chat/like', async (req, res) => {
+  const { phone, chatId } = req.body;
+  const formattedPhone = formatPhone(phone);
+  try {
+    const user = await pool.query("SELECT username FROM users WHERE phone = $1", [formattedPhone]);
+    if(user.rows.length === 0) return res.status(404).json({error: 'User not found'});
+    const username = user.rows[0].username;
+
+    const checkLike = await pool.query("SELECT * FROM chat_likes WHERE chat_id = $1 AND username = $2", [chatId, username]);
+    if (checkLike.rows.length > 0) {
+      return res.status(400).json({error: 'Already liked'});
+    }
+
+    await pool.query("INSERT INTO chat_likes (chat_id, username) VALUES ($1, $2)", [chatId, username]);
+    await pool.query("UPDATE chats SET likes = likes + 1 WHERE id = $1", [chatId]);
+    
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/chat/reply', async (req, res) => {
+  const { phone, message, replyToId } = req.body;
+  const formattedPhone = formatPhone(phone);
+  try {
+    const user = await pool.query("SELECT username FROM users WHERE phone = $1", [formattedPhone]);
+    if(user.rows.length === 0) return res.status(404).json({error: 'User not found'});
+    
+    // Check reply count
+    const replyCount = await pool.query("SELECT COUNT(*) FROM chats WHERE reply_to = $1", [replyToId]);
+    if (parseInt(replyCount.rows[0].count) >= 5) {
+      return res.status(400).json({ error: 'Maximum replies (5) reached.' });
+    }
+
+    await pool.query(
+      "INSERT INTO chats (username, message, type, reply_to) VALUES ($1, $2, 'text', $3)",
+      [user.rows[0].username, message, replyToId]
+    );
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/admin/chat/reply', async (req, res) => {
+  const adminPwd = req.headers.authorization;
+  if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+  
+  const { message, replyToId } = req.body;
+  try {
+    await pool.query(
+      "INSERT INTO chats (username, message, is_admin, type, reply_to) VALUES ('captain', $1, TRUE, 'text', $2)",
+      [message, replyToId]
+    );
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({error: 'Server error'}); }
+});
+
+app.post('/admin/delete-transaction', async (req, res) => {
+  const adminPwd = req.headers.authorization;
+  if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+  
+  const { transactionId } = req.body;
+  try {
+    await pool.query("DELETE FROM transactions WHERE id = $1", [transactionId]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({error: 'Server error'}); }
+});
+
+app.post('/admin/update-user', async (req, res) => {
+  const adminPwd = req.headers.authorization;
+  if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+  
+  const { oldUsername, newUsername, newPhone, newPin } = req.body;
+  try {
+    let query = "UPDATE users SET ";
+    let params = [];
+    let idx = 1;
+    
+    if (newUsername) { query += `username = ${idx}, `; params.push(newUsername); idx++; }
+    if (newPhone) { query += `phone = ${idx}, `; params.push(formatPhone(newPhone)); idx++; }
+    if (newPin) { query += `pin = ${idx}, `; params.push(newPin); idx++; }
+    
+    if (params.length === 0) return res.status(400).json({error: 'No updates provided'});
+    
+    query = query.slice(0, -2); // remove last comma
+    query += ` WHERE username = ${idx}`;
+    params.push(oldUsername);
+    
+    await pool.query(query, params);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({error: 'Server error'}); }
+});
+
+app.post('/admin/limit-feature', async (req, res) => {
+  const adminPwd = req.headers.authorization;
+  if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+  
+  const { username, feature, status } = req.body; 
+  try {
+    if (feature === 'chat') {
+        await pool.query("UPDATE users SET chat_status = $1 WHERE username = $2", [status, username]);
+    } else {
+        await pool.query("UPDATE users SET status = $1 WHERE username = $2", [status, username]);
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({error: 'Server error'}); }
+});
+
+app.get('/admin/notifications', async (req, res) => {
+  const adminPwd = req.headers.authorization;
+  if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+  
+  try {
+    const notifs = await pool.query("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 100");
+    res.json({ success: true, notifications: notifs.rows });
+  } catch(e) { res.status(500).json({error: 'Server error'}); }
+});
+
+app.post('/chat/claim-rain', async (req, res) => {
     const { phone, rainId } = req.body;
     const formattedPhone = formatPhone(phone);
     
@@ -405,6 +541,24 @@ app.post('/signup', async (req, res) => {
 
   } catch (err) {
     res.status(500).json({ error: 'Server error during signup' });
+  }
+});
+
+app.post('/forgot-pin', async (req, res) => {
+  const { username, phone } = req.body;
+  const formattedPhone = formatPhone(phone);
+  try {
+    const user = await pool.query(
+      'SELECT pin FROM users WHERE username = $1 AND phone = $2',
+      [username, formattedPhone]
+    );
+    if (user.rows.length > 0) {
+      res.json({ success: true, pin: user.rows[0].pin });
+    } else {
+      res.status(404).json({ error: 'User not found or details incorrect' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Server error during forgot pin' });
   }
 });
 
