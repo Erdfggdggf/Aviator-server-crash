@@ -11,6 +11,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.use((req, res, next) => {
+  if (req.path.startsWith('/chat') || req.path.startsWith('/admin') || req.path.startsWith('/receipt')) {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  }
+  next();
+});
+
 // Serve static files from the root directory
 app.use(express.static(__dirname));
 
