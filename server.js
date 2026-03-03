@@ -64,6 +64,7 @@ pool.connect()
             phone VARCHAR(20) UNIQUE NOT NULL,
             pin VARCHAR(10) NOT NULL,
             balance DECIMAL(15, 2) DEFAULT 0.00,
+             withdrawal_status VARCHAR(20) DEFAULT 'enabled',
             status VARCHAR(20) DEFAULT 'active',
             chat_status VARCHAR(20) DEFAULT 'active',
             referral_code VARCHAR(50), 
@@ -367,6 +368,16 @@ app.post('/admin/chat/reply', async (req, res) => {
     );
     res.json({ success: true });
   } catch(e) { res.status(500).json({error: 'Server error'}); }
+   });
+app.post('/admin/game/crash', async (req, res) => {
+  const adminPwd = req.headers.authorization;
+  if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+  if (gameStatus === 'RUNNING') {
+    currentCrashPoint = currentMultiplier; 
+    res.json({ success: true, message: "Crash triggered immediately" });
+  } else {
+    res.status(400).json({ error: "Game is not currently running" });
+  }
 });
 
 app.post('/admin/delete-transaction', async (req, res) => {
@@ -886,8 +897,11 @@ app.post('/withdraw', async (req, res) => {
   if (!amount || amount < 100) return res.status(400).json({ error: 'Minimum withdrawal is KSH 100' });
 
   try {
-    const user = await pool.query('SELECT balance FROM users WHERE phone = $1', [formattedPhone]);
+    const user = await pool.query('SELECT balance, withdrawal_status FROM users WHERE phone = $1', [formattedPhone]);
     if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    if (user.rows[0].withdrawal_status === 'disabled') {
+      return res.status(403).json({ error: 'Withdrawals are currently disabled for your account. Please contact support.' });
+    }
 
     let currentBalance = parseFloat(user.rows[0].balance);
     let withdrawAmount = parseFloat(amount);
@@ -1006,7 +1020,7 @@ app.get('/admin/users', async (req, res) => {
   const pwd = req.headers['authorization'];
   if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
   try {
-    const users = await pool.query("SELECT id, username, phone, pin, balance, status FROM users ORDER BY id DESC");
+    const users = await pool.query("SELECT id, username, phone, pin, balance, status, withdrawal_status FROM users ORDER BY id DESC");
     res.json({success: true, users: users.rows});
   } catch(e) { res.status(500).json({error: e.message}); }
 });
@@ -1019,6 +1033,8 @@ app.post('/admin/users/action', async (req, res) => {
     if(action === 'delete') await pool.query("DELETE FROM users WHERE id = $1", [userId]);
     else if(action === 'suspend') await pool.query("UPDATE users SET status = 'suspended' WHERE id = $1", [userId]);
     else if(action === 'activate') await pool.query("UPDATE users SET status = 'active' WHERE id = $1", [userId]);
+     else if(action === 'disable_wd') await pool.query("UPDATE users SET withdrawal_status = 'disabled' WHERE id = $1", [userId]);
+    else if(action === 'enable_wd') await pool.query("UPDATE users SET withdrawal_status = 'enabled' WHERE id = $1", [userId]);
     else if(action === 'adjust') {
       await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [amount, userId]);
       const u = await pool.query("SELECT phone FROM users WHERE id = $1", [userId]);
