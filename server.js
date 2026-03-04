@@ -223,8 +223,8 @@ function formatPhone(phone) {
       const lockCheck = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'chat_locked'");
       const isLocked = lockCheck.rows.length > 0 && lockCheck.rows[0].setting_value === 'true';
       
-      // Cleanup old chats (> 48 hours)
-      await pool.query("DELETE FROM chats WHERE created_at < CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi' - INTERVAL '48 hours'");
+      // Cleanup old chats (> 48 hours) - COMMENTED OUT SO CHATS ARE NEVER DELETED
+      // await pool.query("DELETE FROM chats WHERE created_at < CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi' - INTERVAL '48 hours'");
       
       // Fetch last 150 messages
       const msgs = await pool.query(`
@@ -286,8 +286,8 @@ function formatPhone(phone) {
         return res.status(400).json({ error: 'Spam/phone numbers are not allowed.' });
       }
 
-      if(message.trim().split(/\s+/).length > 10) {
-        return res.status(400).json({ error: 'Message must not exceed 10 words.' });
+      if(message.trim().split(/\s+/).length < 5) {
+        return res.status(400).json({ error: 'Message must be at least 5 words.' });
       }
       
       // Rate limit: Max 5 chats per minute
