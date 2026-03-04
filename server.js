@@ -248,7 +248,7 @@ function formatPhone(phone) {
           current_claims: m.current_claims,
           cr_seconds_passed: m.cr_seconds_passed,
           created_at: m.created_at,
-          likes: m.likes || 0,
+          likes: m.liked_by ? m.liked_by.length : 0,
           liked_by: m.liked_by || [],
           reply_to: m.reply_to
         };
@@ -329,13 +329,13 @@ app.post('/chat/like', async (req, res) => {
     if (checkLike.rows.length > 0) {
       // Toggle OFF (Unlike)
       await pool.query("DELETE FROM chat_likes WHERE chat_id = $1 AND username = $2", [chatId, username]);
-      await pool.query("UPDATE chats SET likes = GREATEST(likes - 1, 0) WHERE id = $1", [chatId]);
+      await pool.query("UPDATE chats SET likes = GREATEST(COALESCE(likes, 0) - 1, 0) WHERE id = $1", [chatId]);
       return res.json({ success: true, action: 'unliked' });
     }
     // Toggle ON (Like)
 
     await pool.query("INSERT INTO chat_likes (chat_id, username) VALUES ($1, $2)", [chatId, username]);
-    await pool.query("UPDATE chats SET likes = likes + 1 WHERE id = $1", [chatId]);
+    await pool.query("UPDATE chats SET likes = COALESCE(likes, 0) + 1 WHERE id = $1", [chatId]);
     
     res.json({ success: true, action: 'liked' });
   } catch(e) {
