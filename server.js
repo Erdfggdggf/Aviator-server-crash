@@ -286,8 +286,8 @@ function formatPhone(phone) {
         return res.status(400).json({ error: 'Spam/phone numbers are not allowed.' });
       }
 
-      if(message.trim().split(/\s+/).length < 5) {
-        return res.status(400).json({ error: 'Message must be at least 5 words.' });
+      if(message.trim().split(/\s+/).length > 10) {
+        return res.status(400).json({ error: 'Message must not exceed 10 words.' });
       }
       
       // Rate limit: Max 5 chats per minute
