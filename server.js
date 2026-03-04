@@ -11,13 +11,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.use((req, res, next) => {
-  if (req.path.startsWith('/chat') || req.path.startsWith('/admin') || req.path.startsWith('/receipt')) {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  }
-  next();
-});
-
 // Serve static files from the root directory
 app.use(express.static(__dirname));
 
@@ -231,11 +224,12 @@ function formatPhone(phone) {
       const isLocked = lockCheck.rows.length > 0 && lockCheck.rows[0].setting_value === 'true';
       
       // Cleanup old chats (> 48 hours)
-      await pool.query("DELETE FROM chats WHERE created_at < NOW() - INTERVAL '48 hours'");
+      await pool.query("DELETE FROM chats WHERE created_at < CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi' - INTERVAL '48 hours'");
       
-      // Fetch last 50 messages
+      // Fetch last 150 messages
       const msgs = await pool.query(`
-        SELECT c.*, cr.amount, cr.max_claims, cr.current_claims 
+        SELECT c.*, cr.amount, cr.max_claims, cr.current_claims,
+               EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi' - cr.created_at)) as cr_seconds_passed
         FROM chats c
         LEFT JOIN cashrains cr ON cr.chat_id = c.id
         ORDER BY c.created_at DESC LIMIT 150
@@ -251,6 +245,7 @@ function formatPhone(phone) {
           amount: m.amount,
           max_claims: m.max_claims,
           current_claims: m.current_claims,
+          cr_seconds_passed: m.cr_seconds_passed,
           created_at: m.created_at,
           likes: m.likes || 0,
           reply_to: m.reply_to,
@@ -289,6 +284,10 @@ function formatPhone(phone) {
       
       if(spamRegex.test(message)) {
         return res.status(400).json({ error: 'Spam/phone numbers are not allowed.' });
+      }
+
+      if(message.trim().split(/\s+/).length < 5) {
+        return res.status(400).json({ error: 'Message must be at least 5 words.' });
       }
       
       // Rate limit: Max 5 chats per minute
@@ -550,6 +549,49 @@ app.post('/chat/claim-rain', async (req, res) => {
     try {
       const r = await pool.query("UPDATE users SET chat_status = 'suspended' WHERE username = $1 RETURNING id", [username]);
       if(r.rows.length === 0) return res.status(404).json({error: 'User not found'});
+      res.json({ success: true });
+    } catch(e) { res.status(500).json({error: 'Server error'}); }
+  });
+
+  app.post('/admin/chat/unsuspend-user', async (req, res) => {
+    const adminPwd = req.headers.authorization;
+    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+    
+    const { username } = req.body;
+    try {
+      const r = await pool.query("UPDATE users SET chat_status = 'active' WHERE username = $1 RETURNING id", [username]);
+      if(r.rows.length === 0) return res.status(404).json({error: 'User not found'});
+      res.json({ success: true });
+    } catch(e) { res.status(500).json({error: 'Server error'}); }
+  });
+
+  app.get('/admin/chat/suspended-users', async (req, res) => {
+    const adminPwd = req.headers.authorization;
+    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+    
+    try {
+      const r = await pool.query("SELECT username FROM users WHERE chat_status = 'suspended'");
+      res.json({ success: true, users: r.rows.map(row => row.username) });
+    } catch(e) { res.status(500).json({error: 'Server error'}); }
+  });
+
+  app.post('/admin/chat/reply-by-username', async (req, res) => {
+    const adminPwd = req.headers.authorization;
+    if (adminPwd !== "3462Abel@#") return res.status(403).json({ error: "Unauthorized" });
+    
+    const { username, message } = req.body;
+    if(!username || !message) return res.status(400).json({error: 'Username and message required'});
+    
+    try {
+      const userChat = await pool.query("SELECT id FROM chats WHERE username = $1 ORDER BY created_at DESC LIMIT 1", [username]);
+      if (userChat.rows.length === 0) return res.status(404).json({error: 'No recent chat found for this user to reply to'});
+      
+      const replyToId = userChat.rows[0].id;
+      
+      await pool.query(
+        "INSERT INTO chats (username, message, is_admin, type, reply_to) VALUES ('captain', $1, TRUE, 'text', $2)",
+        [message, replyToId]
+      );
       res.json({ success: true });
     } catch(e) { res.status(500).json({error: 'Server error'}); }
   });
