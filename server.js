@@ -229,7 +229,8 @@ function formatPhone(phone) {
       // Fetch last 150 messages
       const msgs = await pool.query(`
         SELECT c.*, cr.amount, cr.max_claims, cr.current_claims,
-               EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi' - cr.created_at)) as cr_seconds_passed
+               EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi' - cr.created_at)) as cr_seconds_passed,
+               ARRAY(SELECT username FROM chat_likes WHERE chat_id = c.id) as liked_by
         FROM chats c
         LEFT JOIN cashrains cr ON cr.chat_id = c.id
         ORDER BY c.created_at DESC LIMIT 150
@@ -248,8 +249,7 @@ function formatPhone(phone) {
           cr_seconds_passed: m.cr_seconds_passed,
           created_at: m.created_at,
           likes: m.likes || 0,
-          reply_to: m.reply_to,
-          likes: m.likes || 0,
+          liked_by: m.liked_by || [],
           reply_to: m.reply_to
         };
       });
@@ -327,13 +327,17 @@ app.post('/chat/like', async (req, res) => {
 
     const checkLike = await pool.query("SELECT * FROM chat_likes WHERE chat_id = $1 AND username = $2", [chatId, username]);
     if (checkLike.rows.length > 0) {
-      return res.status(400).json({error: 'Already liked'});
+      // Toggle OFF (Unlike)
+      await pool.query("DELETE FROM chat_likes WHERE chat_id = $1 AND username = $2", [chatId, username]);
+      await pool.query("UPDATE chats SET likes = GREATEST(likes - 1, 0) WHERE id = $1", [chatId]);
+      return res.json({ success: true, action: 'unliked' });
     }
+    // Toggle ON (Like)
 
     await pool.query("INSERT INTO chat_likes (chat_id, username) VALUES ($1, $2)", [chatId, username]);
     await pool.query("UPDATE chats SET likes = likes + 1 WHERE id = $1", [chatId]);
     
-    res.json({ success: true });
+    res.json({ success: true, action: 'liked' });
   } catch(e) {
     res.status(500).json({ error: 'Server error' });
   }
