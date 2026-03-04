@@ -1641,6 +1641,10 @@ app.post("/callback", async (req, res) => {
   const existingReceipt = receipts[ref] || {};
   const resultCode = data.result?.ResultCode;
 
+  if (existingReceipt.status === "success") {
+    return res.json({ ResultCode: 0, ResultDesc: "Callback already processed" });
+  }
+
   if (resultCode === 0) {
 
     receipts[ref] = {
