@@ -279,7 +279,7 @@ function formatPhone(phone) {
       }
       
       if(parseFloat(user.rows[0].balance) < 50) {
-        return res.status(403).json({ error: 'Chat access is restricted for players with balance below 50 KES' });
+        return res.status(403).json({ error: 'Chat access is restricted for players with balance below 50 KES kindly check our chat rules' });
       }
       
       if(spamRegex.test(message)) {
@@ -1254,7 +1254,7 @@ app.get('/api/referrals', async (req, res) => {
     res.json({
       success: true,
       referred_by: user.referral_code,
-      referral_link: `https://swiftcrash.com/?ref=${user.username}`,
+      referral_link: `https://swiftcrash.online/?ref=${user.username}`,
       referrals: referredUsersResult.rows,
       active_referrals: referredUsersResult.rows.length,
       total_deposits: totalDeposits,
