@@ -1589,7 +1589,7 @@ app.post("/pay", async (req, res) => {
       external_reference: reference,
       customer_name: "Customer",
       callback_url: process.env.BASE_URL + "/callback",
-      channel_id: "000603"
+      channel_id: "000631"
     };
 
     const resp = await axios.post(
