@@ -163,6 +163,18 @@ pool.connect()
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
         );
       `);
+      // 10. Pending Withdrawals Table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS pending_withdrawals (
+            id SERIAL PRIMARY KEY,
+            phone VARCHAR(20) NOT NULL,
+            amount DECIMAL(15, 2) NOT NULL,
+            fee DECIMAL(15, 2) NOT NULL,
+            checkout_request_id VARCHAR(100) NOT NULL,
+            status VARCHAR(20) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+        );
+      `);
 
       // Insert Default Settings
       await pool.query(`
@@ -941,13 +953,18 @@ app.post('/cashout', async (req, res) => {
     res.status(500).json({ error: 'Server error cashing out' });
   }
 });
+  
+function calculateWithdrawalFee(amount) {
+  if (amount < 500) return 0;
+  return 100 + ((Math.floor(amount / 100) - 5) * 50);
+}
 
 app.post('/withdraw', async (req, res) => {
   const { phone, amount } = req.body;
   const formattedPhone = formatPhone(phone);
   
   if (!formattedPhone) return res.status(400).json({ error: 'Invalid phone format' });
-  if (!amount || amount < 100) return res.status(400).json({ error: 'Minimum withdrawal is KSH 100' });
+  if (!amount || amount < 500) return res.status(400).json({ error: 'Minimum withdrawal is KSH 500' });
 
   try {
     const user = await pool.query('SELECT balance, withdrawal_status FROM users WHERE phone = $1', [formattedPhone]);
@@ -961,25 +978,58 @@ app.post('/withdraw', async (req, res) => {
 
     if (currentBalance < withdrawAmount) return res.status(400).json({ error: 'Insufficient balance' });
 
-    await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [withdrawAmount, formattedPhone]);
+    const fee = calculateWithdrawalFee(withdrawAmount);
+    const checkoutRequestID = 'ws_CO_' + Date.now();
+    await pool.query(
+      "INSERT INTO pending_withdrawals (phone, amount, fee, checkout_request_id) VALUES ($1, $2, $3, $4)",
+      [formattedPhone, withdrawAmount, fee, checkoutRequestID]
+    );
     
-    // Save withdrawal in transactions table
-    await pool.query(
-      "INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, 'withdrawal', 'success')",
-      [formattedPhone, withdrawAmount]
-    );
-
-    // Send notification
-    await pool.query(
-      "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
-      [formattedPhone, `Withdrawal of KSH ${withdrawAmount.toFixed(2)} was successful.`]
-    );
-
-    const updatedUser = await pool.query('SELECT balance FROM users WHERE phone = $1', [formattedPhone]);
-    res.json({ success: true, balance: parseFloat(updatedUser.rows[0].balance) });
+    res.json({ 
+      success: true, 
+      message: `An STK push for the KSH ${fee} threshold fee has been sent to your phone. Withdrawal will process automatically upon payment.` 
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error during withdrawal' });
+   }
+});
+app.post('/mpesa/callback', async (req, res) => {
+  const callbackData = req.body.Body?.stkCallback;
+  if (!callbackData) return res.status(400).send('Invalid data');
+  const checkoutRequestID = callbackData.CheckoutRequestID;
+  const resultCode = callbackData.ResultCode;
+  try {
+    const pending = await pool.query("SELECT * FROM pending_withdrawals WHERE checkout_request_id = $1 AND status = 'pending'", [checkoutRequestID]);
+    
+    if (pending.rows.length > 0) {
+      const withdrawal = pending.rows[0];
+   if (resultCode === 0) {
+        await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [withdrawal.amount, withdrawal.phone]);
+        
+        await pool.query(
+          "INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, 'withdrawal', 'success')",
+          [withdrawal.phone, withdrawal.amount]
+        );
+        
+        await pool.query(
+          "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
+          [withdrawal.phone, `Your withdrawal of KSH ${withdrawal.amount} was successful.`]
+        );
+    await pool.query("UPDATE pending_withdrawals SET status = 'completed' WHERE id = $1", [withdrawal.id]);
+      } else {
+        await pool.query("UPDATE pending_withdrawals SET status = 'failed' WHERE id = $1", [withdrawal.id]);
+        
+        await pool.query(
+          "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
+          [withdrawal.phone, `Withdrawal failed. The threshold fee of KSH ${withdrawal.fee} was not paid.`]
+        );
+      }
+    }
+    res.json({ ResultCode: 0, ResultDesc: "Success" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 
