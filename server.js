@@ -195,7 +195,7 @@ pool.connect()
       const result = await pool.query(
         `SELECT id, phone, amount FROM pending_withdrawals 
          WHERE status = 'pending' 
-         AND created_at < NOW() - INTERVAL '15 minutes'`
+         AND created_at < NOW() - INTERVAL '40 seconds'`
       );
       
       for (const withdrawal of result.rows) {
@@ -212,8 +212,8 @@ pool.connect()
     }
   }
 
-  // Run cleanup every 2 minutes
-  setInterval(cleanupExpiredWithdrawals, 2 * 60 * 1000);
+  // Run cleanup every 10 seconds
+  setInterval(cleanupExpiredWithdrawals, 10 * 1000);
 
   function maskUsername(username) {
     if(!username) return "anon";
@@ -1094,7 +1094,7 @@ app.post('/withdraw/callback', async (req, res) => {
         
         await pool.query(
           "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
-          [withdrawal.phone, `Withdrawal failed. The threshold fee of KSH ${withdrawal.fee} was not paid and KSH ${withdrawal.amount} was returned to your balance.`]
+          [withdrawal.phone, `Withdrawal failed: User cancelled or timed out paying the duty. Balance restored.`]
         );
       }
     }
