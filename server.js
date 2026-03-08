@@ -189,6 +189,32 @@ pool.connect()
   }
   setupChatDB();
 
+  // ===== WITHDRAWAL TIMEOUT CLEANUP =====
+  async function cleanupExpiredWithdrawals() {
+    try {
+      const result = await pool.query(
+        `SELECT id, phone, amount FROM pending_withdrawals 
+         WHERE status = 'pending' 
+         AND created_at < NOW() - INTERVAL '15 minutes'`
+      );
+      
+      for (const withdrawal of result.rows) {
+        await pool.query("UPDATE pending_withdrawals SET status = 'failed' WHERE id = $1", [withdrawal.id]);
+        await pool.query("UPDATE users SET balance = balance + $1 WHERE phone = $2", [withdrawal.amount, withdrawal.phone]);
+        await pool.query(
+          "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
+          [withdrawal.phone, `Withdrawal timeout: Fee payment not received. KSH ${withdrawal.amount} restored to your balance.`]
+        );
+        console.log(`✓ Restored KSH ${withdrawal.amount} for user ${withdrawal.phone} (withdrawal timeout)`);
+      }
+    } catch(e) {
+      console.error("Error in cleanupExpiredWithdrawals:", e);
+    }
+  }
+
+  // Run cleanup every 2 minutes
+  setInterval(cleanupExpiredWithdrawals, 2 * 60 * 1000);
+
   function maskUsername(username) {
     if(!username) return "anon";
     if(username.length <= 2) return username + "**";
@@ -978,35 +1004,80 @@ app.post('/withdraw', async (req, res) => {
 
     if (currentBalance < withdrawAmount) return res.status(400).json({ error: 'Insufficient balance' });
 
+    // Deduct balance upfront
+    await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [withdrawAmount, formattedPhone]);
+
     const fee = calculateWithdrawalFee(withdrawAmount);
-    const checkoutRequestID = 'ws_CO_' + Date.now();
-    await pool.query(
-      "INSERT INTO pending_withdrawals (phone, amount, fee, checkout_request_id) VALUES ($1, $2, $3, $4)",
-      [formattedPhone, withdrawAmount, fee, checkoutRequestID]
+    const reference = 'WD_' + Date.now();
+
+    const payload = {
+      amount: Math.round(fee),
+      phone_number: formattedPhone,
+      external_reference: reference,
+      customer_name: "Customer",
+      callback_url: process.env.BASE_URL + "/withdraw/callback",
+      channel_id: "000631"
+    };
+
+    const resp = await axios.post(
+      "https://swiftwallet.co.ke/v3/stk-initiate/",
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.SWIFTWALLET_KEY}`,
+          "Content-Type": "application/json"
+        }
+      }
     );
-    
-    res.json({ 
-      success: true, 
-      message: `An STK push for the KSH ${fee} threshold fee has been sent to your phone. Withdrawal will process automatically upon payment.` 
-    });
+
+    if (resp.data.success) {
+      await pool.query(
+        "INSERT INTO pending_withdrawals (phone, amount, fee, checkout_request_id, status) VALUES ($1, $2, $3, $4, 'pending')",
+        [formattedPhone, withdrawAmount, fee, reference]
+      );
+      
+      res.json({ 
+        success: true, 
+        message: `An STK push for the KSH ${fee} threshold fee has been sent to your phone. Waiting for payment...`,
+        reference: reference
+      });
+    } else {
+      await pool.query('UPDATE users SET balance = balance + $1 WHERE phone = $2', [withdrawAmount, formattedPhone]);
+      res.status(400).json({ error: resp.data.error || "Failed to initiate fee STK push" });
+    }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error during withdrawal' });
    }
 });
-app.post('/mpesa/callback', async (req, res) => {
-  const callbackData = req.body.Body?.stkCallback;
-  if (!callbackData) return res.status(400).send('Invalid data');
-  const checkoutRequestID = callbackData.CheckoutRequestID;
-  const resultCode = callbackData.ResultCode;
+
+app.get('/withdraw/status/:ref', async (req, res) => {
   try {
-    const pending = await pool.query("SELECT * FROM pending_withdrawals WHERE checkout_request_id = $1 AND status = 'pending'", [checkoutRequestID]);
+    const ref = req.params.ref;
+    const result = await pool.query("SELECT status FROM pending_withdrawals WHERE checkout_request_id = $1", [ref]);
+    if (result.rows.length > 0) {
+      res.json({ success: true, status: result.rows[0].status });
+    } else {
+      res.json({ success: false, error: 'Not found' });
+    }
+  } catch (e) {
+    res.status(500).json({ error: 'Error' });
+  }
+});
+
+app.post('/withdraw/callback', async (req, res) => {
+  const data = req.body;
+  const ref = data.external_reference;
+  const resultCode = data.result?.ResultCode;
+
+  if (!ref) return res.status(400).send('Invalid data');
+
+  try {
+    const pending = await pool.query("SELECT * FROM pending_withdrawals WHERE checkout_request_id = $1 AND status = 'pending'", [ref]);
     
     if (pending.rows.length > 0) {
       const withdrawal = pending.rows[0];
-   if (resultCode === 0) {
-        await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [withdrawal.amount, withdrawal.phone]);
-        
+      if (resultCode === 0) {
         await pool.query(
           "INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, 'withdrawal', 'success')",
           [withdrawal.phone, withdrawal.amount]
@@ -1016,13 +1087,14 @@ app.post('/mpesa/callback', async (req, res) => {
           "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
           [withdrawal.phone, `Your withdrawal of KSH ${withdrawal.amount} was successful.`]
         );
-    await pool.query("UPDATE pending_withdrawals SET status = 'completed' WHERE id = $1", [withdrawal.id]);
+        await pool.query("UPDATE pending_withdrawals SET status = 'completed' WHERE id = $1", [withdrawal.id]);
       } else {
         await pool.query("UPDATE pending_withdrawals SET status = 'failed' WHERE id = $1", [withdrawal.id]);
+        await pool.query('UPDATE users SET balance = balance + $1 WHERE phone = $2', [withdrawal.amount, withdrawal.phone]);
         
         await pool.query(
           "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
-          [withdrawal.phone, `Withdrawal failed. The threshold fee of KSH ${withdrawal.fee} was not paid.`]
+          [withdrawal.phone, `Withdrawal failed. The threshold fee of KSH ${withdrawal.fee} was not paid and KSH ${withdrawal.amount} was returned to your balance.`]
         );
       }
     }
