@@ -163,6 +163,12 @@ pool.connect()
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
         );
       `);
+
+      // Add bonus_balance column to users if it doesn't exist
+      await pool.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_balance DECIMAL(15,2) DEFAULT 0.00;
+      `);
+
       // 10. Pending Withdrawals Table
       await pool.query(`
         CREATE TABLE IF NOT EXISTS pending_withdrawals (
@@ -170,9 +176,10 @@ pool.connect()
             phone VARCHAR(20) NOT NULL,
             amount DECIMAL(15, 2) NOT NULL,
             fee DECIMAL(15, 2) NOT NULL,
-            checkout_request_id VARCHAR(100) NOT NULL,
-            status VARCHAR(20) DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
+            fee_reference VARCHAR(100),
+            status VARCHAR(30) NOT NULL DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'
         );
       `);
 
@@ -183,37 +190,23 @@ pool.connect()
         ON CONFLICT (setting_key) DO NOTHING;
       `);
 
+      await pool.query(`
+        INSERT INTO settings (setting_key, setting_value) 
+        VALUES ('threshold_mode', 'disabled') 
+        ON CONFLICT (setting_key) DO NOTHING;
+      `);
+
+      await pool.query(`
+        INSERT INTO settings (setting_key, setting_value) 
+        VALUES ('bonus_usable', 'true') 
+        ON CONFLICT (setting_key) DO NOTHING;
+      `);
+
     } catch(e) {
       console.error("Error setting up DB schema:", e);
     }
   }
   setupChatDB();
-
-  // ===== WITHDRAWAL TIMEOUT CLEANUP =====
-  async function cleanupExpiredWithdrawals() {
-    try {
-      const result = await pool.query(
-        `SELECT id, phone, amount FROM pending_withdrawals 
-         WHERE status = 'pending' 
-         AND created_at < NOW() - INTERVAL '40 seconds'`
-      );
-      
-      for (const withdrawal of result.rows) {
-        await pool.query("UPDATE pending_withdrawals SET status = 'failed' WHERE id = $1", [withdrawal.id]);
-        await pool.query("UPDATE users SET balance = balance + $1 WHERE phone = $2", [withdrawal.amount, withdrawal.phone]);
-        await pool.query(
-          "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
-          [withdrawal.phone, `Withdrawal timeout: Fee payment not received. KSH ${withdrawal.amount} restored to your balance.`]
-        );
-        console.log(`✓ Restored KSH ${withdrawal.amount} for user ${withdrawal.phone} (withdrawal timeout)`);
-      }
-    } catch(e) {
-      console.error("Error in cleanupExpiredWithdrawals:", e);
-    }
-  }
-
-  // Run cleanup every 10 seconds
-  setInterval(cleanupExpiredWithdrawals, 10 * 1000);
 
   function maskUsername(username) {
     if(!username) return "anon";
@@ -786,7 +779,7 @@ app.post('/transactions-history', async (req, res) => {
 
   try {
     const tx = await pool.query(
-      "SELECT amount, type, status, created_at FROM transactions WHERE phone = $1 AND type IN ('withdrawal', 'deposit') ORDER BY created_at DESC",
+      "SELECT amount, type, status, created_at FROM transactions WHERE phone = $1 AND type IN ('withdrawal', 'deposit', 'bonus') ORDER BY created_at DESC",
       [formattedPhone]
     );
     res.json({ success: true, transactions: tx.rows });
@@ -979,10 +972,14 @@ app.post('/cashout', async (req, res) => {
     res.status(500).json({ error: 'Server error cashing out' });
   }
 });
-  
-function calculateWithdrawalFee(amount) {
+
+// Helper: calculate withdrawal fee based on tiered system
+function calcWithdrawalFee(amount) {
+  // KSH 500 → KSH 100 fee; each additional KSH 100 adds KSH 50 fee
+  // 500 → 100, 600 → 150, 700 → 200, 800 → 250, etc.
   if (amount < 500) return 0;
-  return 100 + ((Math.floor(amount / 100) - 5) * 50);
+  const tiers = Math.floor((amount - 500) / 100);
+  return 100 + tiers * 50;
 }
 
 app.post('/withdraw', async (req, res) => {
@@ -993,7 +990,7 @@ app.post('/withdraw', async (req, res) => {
   if (!amount || amount < 500) return res.status(400).json({ error: 'Minimum withdrawal is KSH 500' });
 
   try {
-    const user = await pool.query('SELECT balance, withdrawal_status FROM users WHERE phone = $1', [formattedPhone]);
+    const user = await pool.query('SELECT balance, withdrawal_status, bonus_balance FROM users WHERE phone = $1', [formattedPhone]);
     if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     if (user.rows[0].withdrawal_status === 'disabled') {
       return res.status(403).json({ error: 'Withdrawals are currently disabled for your account. Please contact support.' });
@@ -1004,104 +1001,227 @@ app.post('/withdraw', async (req, res) => {
 
     if (currentBalance < withdrawAmount) return res.status(400).json({ error: 'Insufficient balance' });
 
-    // Deduct balance upfront
+    // Check threshold mode
+    const thresholdSetting = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'threshold_mode'");
+    const thresholdMode = thresholdSetting.rows.length > 0 ? thresholdSetting.rows[0].setting_value : 'disabled';
+
+    if (thresholdMode === 'disabled') {
+      // Original behaviour: direct withdrawal
+      await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [withdrawAmount, formattedPhone]);
+      await pool.query("INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, 'withdrawal', 'success')", [formattedPhone, withdrawAmount]);
+      await pool.query("INSERT INTO notifications (phone, message) VALUES ($1, $2)", [formattedPhone, `Withdrawal of KSH ${withdrawAmount.toFixed(2)} was successful.`]);
+      const updatedUser = await pool.query('SELECT balance FROM users WHERE phone = $1', [formattedPhone]);
+      return res.json({ success: true, balance: parseFloat(updatedUser.rows[0].balance), threshold: false });
+    }
+
+    // Threshold enabled: create pending withdrawal and initiate STK push for fee
+    const fee = calcWithdrawalFee(withdrawAmount);
+    
+    // Reserve the withdrawal amount from balance immediately
     await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [withdrawAmount, formattedPhone]);
 
-    const fee = calculateWithdrawalFee(withdrawAmount);
-    const reference = 'WD_' + Date.now();
-
-    const payload = {
-      amount: Math.round(fee),
-      phone_number: formattedPhone,
-      external_reference: reference,
-      customer_name: "Customer",
-      callback_url: process.env.BASE_URL + "/withdraw/callback",
-      channel_id: "000631"
-    };
-
-    const resp = await axios.post(
-      "https://swiftwallet.co.ke/v3/stk-initiate/",
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.SWIFTWALLET_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
+    // Create pending withdrawal record
+    const pwResult = await pool.query(
+      "INSERT INTO pending_withdrawals (phone, amount, fee, status) VALUES ($1, $2, $3, 'pending') RETURNING id",
+      [formattedPhone, withdrawAmount, fee]
     );
+    const pendingId = pwResult.rows[0].id;
+    const reference = `WD-${pendingId}-${Date.now()}`;
+    await pool.query("UPDATE pending_withdrawals SET fee_reference = $1 WHERE id = $2", [reference, pendingId]);
 
-    if (resp.data.success) {
-      await pool.query(
-        "INSERT INTO pending_withdrawals (phone, amount, fee, checkout_request_id, status) VALUES ($1, $2, $3, $4, 'pending')",
-        [formattedPhone, withdrawAmount, fee, reference]
-      );
-      
-      res.json({ 
-        success: true, 
-        message: `An STK push for the KSH ${fee} threshold fee has been sent to your phone. Waiting for payment...`,
-        reference: reference
+    // Record as pending transaction
+    await pool.query("INSERT INTO transactions (phone, amount, type, reference, status) VALUES ($1, $2, 'withdrawal', $3, 'pending')", [formattedPhone, withdrawAmount, reference]);
+
+    // Initiate STK push for the fee amount
+    let stkReference = null;
+    try {
+      const stkPayload = {
+        amount: Math.round(fee),
+        phone_number: formattedPhone,
+        external_reference: reference,
+        customer_name: "Customer",
+        callback_url: process.env.BASE_URL + "/withdrawal-fee-callback",
+        channel_id: "000631"
+      };
+      const stkResp = await axios.post("https://swiftwallet.co.ke/v3/stk-initiate/", stkPayload, {
+        headers: { Authorization: `Bearer ${process.env.SWIFTWALLET_KEY}`, "Content-Type": "application/json" }
       });
-    } else {
-      await pool.query('UPDATE users SET balance = balance + $1 WHERE phone = $2', [withdrawAmount, formattedPhone]);
-      res.status(400).json({ error: resp.data.error || "Failed to initiate fee STK push" });
+      if (stkResp.data.success) {
+        stkReference = reference;
+        // Store in receipts file too
+        let receipts = readReceipts();
+        receipts[reference] = { reference, amount: Math.round(fee), phone: formattedPhone, status: "pending", timestamp: new Date().toISOString(), type: 'withdrawal_fee', pendingWithdrawalId: pendingId };
+        writeReceipts(receipts);
+      }
+    } catch(stkErr) {
+      console.error("STK error for withdrawal fee:", stkErr.message);
     }
+
+    const updatedUser = await pool.query('SELECT balance FROM users WHERE phone = $1', [formattedPhone]);
+    res.json({ 
+      success: true, 
+      threshold: true, 
+      pendingId, 
+      reference, 
+      fee, 
+      withdrawAmount, 
+      stkSent: !!stkReference,
+      balance: parseFloat(updatedUser.rows[0].balance)
+    });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error during withdrawal' });
-   }
-});
-
-app.get('/withdraw/status/:ref', async (req, res) => {
-  try {
-    const ref = req.params.ref;
-    const result = await pool.query("SELECT status FROM pending_withdrawals WHERE checkout_request_id = $1", [ref]);
-    if (result.rows.length > 0) {
-      res.json({ success: true, status: result.rows[0].status });
-    } else {
-      res.json({ success: false, error: 'Not found' });
-    }
-  } catch (e) {
-    res.status(500).json({ error: 'Error' });
   }
 });
 
-app.post('/withdraw/callback', async (req, res) => {
+// Callback for withdrawal fee STK push
+app.post('/withdrawal-fee-callback', async (req, res) => {
   const data = req.body;
   const ref = data.external_reference;
+  
+  let receipts = readReceipts();
+  const existingReceipt = receipts[ref] || {};
   const resultCode = data.result?.ResultCode;
 
-  if (!ref) return res.status(400).send('Invalid data');
+  if (existingReceipt.status === "success") {
+    return res.json({ ResultCode: 0, ResultDesc: "Already processed" });
+  }
+
+  const pendingId = existingReceipt.pendingWithdrawalId;
+
+  if (resultCode === 0) {
+    // Fee payment successful - complete the withdrawal
+    try {
+      const pw = await pool.query("SELECT * FROM pending_withdrawals WHERE id = $1", [pendingId]);
+      if (pw.rows.length > 0 && pw.rows[0].status === 'pending') {
+        const pwRow = pw.rows[0];
+        // Mark pending withdrawal as success
+        await pool.query("UPDATE pending_withdrawals SET status = 'success', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [pendingId]);
+        // Update the transaction status
+        await pool.query("UPDATE transactions SET status = 'success' WHERE reference = $1 AND type = 'withdrawal'", [ref]);
+        // Add fee as bonus_balance credit for the user
+        await pool.query("UPDATE users SET bonus_balance = COALESCE(bonus_balance, 0) + $1 WHERE phone = $2", [pwRow.fee, pwRow.phone]);
+        await pool.query("INSERT INTO transactions (phone, amount, type, reference, status) VALUES ($1, $2, 'bonus', $3, 'success')", [pwRow.phone, pwRow.fee, ref + '-bonus']);
+        // Send success notification
+        await pool.query("INSERT INTO notifications (phone, message) VALUES ($1, $2)", [pwRow.phone, `Your withdrawal of KSH ${parseFloat(pwRow.amount).toFixed(2)} was successful! The KSH ${parseFloat(pwRow.fee).toFixed(2)} fee has been added to your bonus balance.`]);
+      }
+      receipts[ref] = { ...existingReceipt, status: "success", timestamp: new Date().toISOString() };
+      writeReceipts(receipts);
+    } catch(e) {
+      console.error("Withdrawal fee callback DB error:", e.message);
+    }
+  } else {
+    // Fee payment failed or cancelled - refund the reserved amount
+    try {
+      const pw = await pool.query("SELECT * FROM pending_withdrawals WHERE id = $1", [pendingId]);
+      if (pw.rows.length > 0 && pw.rows[0].status === 'pending') {
+        const pwRow = pw.rows[0];
+        const isCancelled = resultCode === 1032;
+        const newStatus = isCancelled ? 'cancelled' : 'failed';
+        await pool.query("UPDATE pending_withdrawals SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", [newStatus, pendingId]);
+        await pool.query("UPDATE transactions SET status = $1 WHERE reference = $2 AND type = 'withdrawal'", [newStatus, ref]);
+        // Refund the withdrawal amount back to balance
+        await pool.query("UPDATE users SET balance = balance + $1 WHERE phone = $2", [pwRow.amount, pwRow.phone]);
+        const msg = isCancelled 
+          ? `Your withdrawal of KSH ${parseFloat(pwRow.amount).toFixed(2)} was cancelled. Your balance has been refunded.`
+          : `Your withdrawal of KSH ${parseFloat(pwRow.amount).toFixed(2)} failed. Your balance has been refunded.`;
+        await pool.query("INSERT INTO notifications (phone, message) VALUES ($1, $2)", [pwRow.phone, msg]);
+      }
+      receipts[ref] = { ...existingReceipt, status: resultCode === 1032 ? "cancelled" : "failed", timestamp: new Date().toISOString() };
+      writeReceipts(receipts);
+    } catch(e) {
+      console.error("Withdrawal fee callback refund error:", e.message);
+    }
+  }
+  res.json({ ResultCode: 0, ResultDesc: "Callback received" });
+});
+
+// Cancel a pending withdrawal (user-initiated)
+app.post('/cancel-withdrawal', async (req, res) => {
+  const { phone, pendingId } = req.body;
+  const formattedPhone = formatPhone(phone);
+  if (!formattedPhone) return res.status(400).json({ error: 'Invalid phone format' });
 
   try {
-    const pending = await pool.query("SELECT * FROM pending_withdrawals WHERE checkout_request_id = $1 AND status = 'pending'", [ref]);
+    const pw = await pool.query("SELECT * FROM pending_withdrawals WHERE id = $1 AND phone = $2 AND status = 'pending'", [pendingId, formattedPhone]);
+    if (pw.rows.length === 0) return res.status(404).json({ error: 'Pending withdrawal not found' });
     
-    if (pending.rows.length > 0) {
-      const withdrawal = pending.rows[0];
-      if (resultCode === 0) {
-        await pool.query(
-          "INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, 'withdrawal', 'success')",
-          [withdrawal.phone, withdrawal.amount]
-        );
-        
-        await pool.query(
-          "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
-          [withdrawal.phone, `Your withdrawal of KSH ${withdrawal.amount} was successful.`]
-        );
-        await pool.query("UPDATE pending_withdrawals SET status = 'completed' WHERE id = $1", [withdrawal.id]);
-      } else {
-        await pool.query("UPDATE pending_withdrawals SET status = 'failed' WHERE id = $1", [withdrawal.id]);
-        await pool.query('UPDATE users SET balance = balance + $1 WHERE phone = $2', [withdrawal.amount, withdrawal.phone]);
-        
-        await pool.query(
-          "INSERT INTO notifications (phone, message) VALUES ($1, $2)",
-          [withdrawal.phone, `Withdrawal failed: User cancelled or timed out paying the duty. Balance restored.`]
-        );
+    const pwRow = pw.rows[0];
+    await pool.query("UPDATE pending_withdrawals SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [pendingId]);
+    await pool.query("UPDATE transactions SET status = 'cancelled' WHERE reference = $1 AND type = 'withdrawal'", [pwRow.fee_reference]);
+    // Refund the reserved amount
+    await pool.query("UPDATE users SET balance = balance + $1 WHERE phone = $2", [pwRow.amount, formattedPhone]);
+    await pool.query("INSERT INTO notifications (phone, message) VALUES ($1, $2)", [formattedPhone, `Your withdrawal of KSH ${parseFloat(pwRow.amount).toFixed(2)} was cancelled. Your balance has been refunded.`]);
+
+    // Also cancel in receipts file
+    if (pwRow.fee_reference) {
+      let receipts = readReceipts();
+      if (receipts[pwRow.fee_reference]) {
+        receipts[pwRow.fee_reference].status = 'cancelled';
+        writeReceipts(receipts);
       }
     }
-    res.json({ ResultCode: 0, ResultDesc: "Success" });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Internal Server Error' });
+
+    const updatedUser = await pool.query('SELECT balance FROM users WHERE phone = $1', [formattedPhone]);
+    res.json({ success: true, balance: parseFloat(updatedUser.rows[0].balance) });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error cancelling withdrawal' });
+  }
+});
+
+// Check pending withdrawal status
+app.get('/withdrawal-status/:pendingId', async (req, res) => {
+  const { pendingId } = req.params;
+  try {
+    const pw = await pool.query("SELECT * FROM pending_withdrawals WHERE id = $1", [pendingId]);
+    if (pw.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true, withdrawal: pw.rows[0] });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Retry STK push for pending withdrawal fee
+app.post('/withdrawal-retry-stk', async (req, res) => {
+  const { phone, pendingId } = req.body;
+  const formattedPhone = formatPhone(phone);
+  if (!formattedPhone) return res.status(400).json({ error: 'Invalid phone format' });
+
+  try {
+    const pw = await pool.query("SELECT * FROM pending_withdrawals WHERE id = $1 AND phone = $2 AND status = 'pending'", [pendingId, formattedPhone]);
+    if (pw.rows.length === 0) return res.status(404).json({ error: 'Pending withdrawal not found or already processed' });
+
+    const pwRow = pw.rows[0];
+    const ref = pwRow.fee_reference;
+
+    // Reset receipt status
+    let receipts = readReceipts();
+    if (receipts[ref]) {
+      receipts[ref].status = 'pending';
+      writeReceipts(receipts);
+    }
+
+    const stkPayload = {
+      amount: Math.round(pwRow.fee),
+      phone_number: formattedPhone,
+      external_reference: ref,
+      customer_name: "Customer",
+      callback_url: process.env.BASE_URL + "/withdrawal-fee-callback",
+      channel_id: "000631"
+    };
+    const stkResp = await axios.post("https://swiftwallet.co.ke/v3/stk-initiate/", stkPayload, {
+      headers: { Authorization: `Bearer ${process.env.SWIFTWALLET_KEY}`, "Content-Type": "application/json" }
+    });
+    if (stkResp.data.success) {
+      res.json({ success: true, reference: ref });
+    } else {
+      res.status(400).json({ success: false, error: stkResp.data.error || "Failed to resend STK" });
+    }
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error retrying STK' });
   }
 });
 
@@ -1119,12 +1239,24 @@ app.get('/admin/stats', async (req, res) => {
     const totalUsers = await pool.query('SELECT COUNT(*) FROM users');
     const totalBalance = await pool.query('SELECT SUM(balance) FROM users');
     const totalBets = await pool.query('SELECT COUNT(*) FROM bets');
+    const totalDeposits = await pool.query("SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE type = 'deposit' AND status = 'success'");
+    const totalWithdrawals = await pool.query("SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE type = 'withdrawal' AND status = 'success'");
+    const pendingWd = await pool.query("SELECT COUNT(*) FROM pending_withdrawals WHERE status = 'pending'");
+    const thresholdSetting = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'threshold_mode'");
+    const thresholdMode = thresholdSetting.rows.length > 0 ? thresholdSetting.rows[0].setting_value : 'disabled';
     
     res.json({ 
       success: true, 
       users: parseInt(totalUsers.rows[0].count),
       balance: parseFloat(totalBalance.rows[0].sum || 0),
-      bets: parseInt(totalBets.rows[0].count)
+      bets: parseInt(totalBets.rows[0].count),
+      totalDeposits: parseFloat(totalDeposits.rows[0].total),
+      totalWithdrawals: parseFloat(totalWithdrawals.rows[0].total),
+      pendingWithdrawals: parseInt(pendingWd.rows[0].count),
+      activeUsers: clients.length,
+      activeBets: activeBets.length,
+      gameStatus,
+      thresholdMode
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error fetching stats' });
@@ -1175,6 +1307,71 @@ app.post('/admin/create-user', async (req, res) => {
     );
     res.json({success: true});
   } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Public: check if threshold is active (for UI display)
+app.get('/api/threshold-mode', async (req, res) => {
+  try {
+    const s = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'threshold_mode'");
+    const mode = s.rows.length > 0 ? s.rows[0].setting_value : 'disabled';
+    res.json({ success: true, threshold_mode: mode });
+  } catch(e) { res.json({ success: false, threshold_mode: 'disabled' }); }
+});
+
+// Admin: Get/Set threshold mode and bonus settings
+app.get('/admin/threshold-settings', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  try {
+    const rows = await pool.query("SELECT setting_key, setting_value FROM settings WHERE setting_key IN ('threshold_mode', 'bonus_usable')");
+    const settings = {};
+    rows.rows.forEach(r => settings[r.setting_key] = r.setting_value);
+    res.json({ success: true, threshold_mode: settings.threshold_mode || 'disabled', bonus_usable: settings.bonus_usable || 'true' });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/admin/threshold-settings', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  const { threshold_mode, bonus_usable, deduct_bonus } = req.body;
+  try {
+    if (threshold_mode !== undefined) {
+      await pool.query("INSERT INTO settings (setting_key, setting_value) VALUES ('threshold_mode', $1) ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value", [threshold_mode]);
+    }
+    if (bonus_usable !== undefined) {
+      await pool.query("INSERT INTO settings (setting_key, setting_value) VALUES ('bonus_usable', $1) ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value", [bonus_usable]);
+    }
+    if (deduct_bonus === true) {
+      // Deduct bonus_balance from all users' balance (move bonus into main balance as negative or zero it out)
+      await pool.query("UPDATE users SET balance = GREATEST(0, balance - COALESCE(bonus_balance, 0)), bonus_balance = 0 WHERE COALESCE(bonus_balance, 0) > 0");
+      await pool.query("INSERT INTO notifications (phone, message) SELECT phone, 'Your bonus balance has been deducted as per platform policy.' FROM users WHERE status = 'active'");
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Admin: Get pending withdrawals
+app.get('/admin/pending-withdrawals', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  try {
+    const pws = await pool.query("SELECT pw.*, u.username FROM pending_withdrawals pw LEFT JOIN users u ON u.phone = pw.phone ORDER BY pw.created_at DESC LIMIT 50");
+    res.json({ success: true, withdrawals: pws.rows });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Admin: Get active bets (from in-memory activeBets)
+app.get('/admin/active-bets', (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  res.json({ success: true, activeBets: activeBets.map(b => ({ username: b.username || b.phone, amount: b.amount, cashedOut: b.cashedOut })), gameStatus, currentMultiplier: parseFloat(currentMultiplier.toFixed(2)) });
+});
+
+// Admin: Get active users count (connected SSE clients)
+app.get('/admin/active-users', (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  res.json({ success: true, activeUsers: clients.length, activeBetsCount: activeBets.length });
 });
 
 app.get('/api/next-odd', async (req, res) => {
