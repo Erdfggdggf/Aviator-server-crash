@@ -15,7 +15,7 @@ app.use(express.json());
 app.use(express.static(__dirname));
 
 // API routes and other middleware...
-// (Make sure this is placed AFTER your API/Admin routes but BEFORE the catch-all)
+// (Make sure this is placed AFTER your ok API/Admin routes but BEFORE the catch-all)
 
 // Catch-all route to serve index.html for SPA routing
 app.get('*', (req, res, next) => {
