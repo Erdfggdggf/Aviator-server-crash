@@ -685,24 +685,26 @@ app.post('/signup', async (req, res) => {
       actualReferralCode = referralCode;
     }
 
+    // Check signup bonus settings
+    let signupBonusAmount = 0;
+    let signupBonusEnabled = false;
+    try {
+      const bonusAmtRow = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'signup_bonus_amount'");
+      const bonusEnabledRow = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'signup_bonus_enabled'");
+      if (bonusAmtRow.rows.length > 0) signupBonusAmount = parseFloat(bonusAmtRow.rows[0].setting_value) || 0;
+      if (bonusEnabledRow.rows.length > 0) signupBonusEnabled = bonusEnabledRow.rows[0].setting_value === 'true';
+    } catch(e) {}
+
+    const initialBalance = (signupBonusEnabled && signupBonusAmount > 0) ? signupBonusAmount : 0;
+
     await pool.query(
-      'INSERT INTO users (username, phone, pin, balance, referral_code) VALUES ($1, $2, $3, 0, $4)',
-      [username, formattedPhone, pin, actualReferralCode]
+      'INSERT INTO users (username, phone, pin, balance, referral_code) VALUES ($1, $2, $3, $4, $5)',
+      [username, formattedPhone, pin, initialBalance, actualReferralCode]
     );
 
-    // Signup bonus
-    try {
-      const bonusEnabledRow = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'signup_bonus_enabled'");
-      const bonusAmountRow = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'signup_bonus_amount'");
-      const bonusEnabled = bonusEnabledRow.rows.length > 0 ? bonusEnabledRow.rows[0].setting_value : 'false';
-      const bonusAmount = bonusAmountRow.rows.length > 0 ? parseFloat(bonusAmountRow.rows[0].setting_value) : 0;
-      if (bonusEnabled === 'true' && bonusAmount > 0) {
-        await pool.query('UPDATE users SET balance = balance + $1 WHERE phone = $2', [bonusAmount, formattedPhone]);
-        await pool.query("INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)", [formattedPhone, bonusAmount, 'signup_bonus', 'success']);
-        await pool.query("INSERT INTO notifications (phone, message) VALUES ($1, $2)", [formattedPhone, `${username}: You received a KSH ${bonusAmount} signup bonus!`]);
-      }
-    } catch (bonusErr) {
-      console.error('Signup bonus error:', bonusErr);
+    if (signupBonusEnabled && signupBonusAmount > 0) {
+      await pool.query("INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)", [formattedPhone, signupBonusAmount, 'bonus', 'success']);
+      await pool.query("INSERT INTO notifications (phone, message) VALUES ($1, $2)", [formattedPhone, `Welcome bonus! KSH ${signupBonusAmount} has been added to your account.`]);
     }
 
     if (actualReferralCode) {
@@ -1322,33 +1324,6 @@ app.post('/admin/create-user', async (req, res) => {
     );
     res.json({success: true});
   } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-// Admin: Get/Set signup bonus settings
-app.get('/admin/signup-bonus-settings', async (req, res) => {
-  const pwd = req.headers['authorization'];
-  if (pwd !== '3462Abel@#') return res.status(401).json({ error: 'Unauthorized' });
-  try {
-    const rows = await pool.query("SELECT setting_key, setting_value FROM settings WHERE setting_key IN ('signup_bonus_enabled', 'signup_bonus_amount')");
-    const settings = {};
-    rows.rows.forEach(r => settings[r.setting_key] = r.setting_value);
-    res.json({ success: true, signup_bonus_enabled: settings.signup_bonus_enabled || 'false', signup_bonus_amount: settings.signup_bonus_amount || '0' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/admin/signup-bonus-settings', async (req, res) => {
-  const pwd = req.headers['authorization'];
-  if (pwd !== '3462Abel@#') return res.status(401).json({ error: 'Unauthorized' });
-  const { signup_bonus_enabled, signup_bonus_amount } = req.body;
-  try {
-    if (signup_bonus_enabled !== undefined) {
-      await pool.query("INSERT INTO settings (setting_key, setting_value) VALUES ('signup_bonus_enabled', $1) ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value", [signup_bonus_enabled]);
-    }
-    if (signup_bonus_amount !== undefined) {
-      await pool.query("INSERT INTO settings (setting_key, setting_value) VALUES ('signup_bonus_amount', $1) ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value", [signup_bonus_amount]);
-    }
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Public: check if threshold is active (for UI display)
@@ -2106,4 +2081,41 @@ app.get("/receipt/:reference/pdf", (req, res) => {
 });
 
 // REMOVED DUPLICATE LISTEN CALL HERE
+
+/* =========================
+   ADMIN: SIGNUP BONUS SETTINGS
+========================= */
+
+app.get('/admin/signup-bonus', async (req, res) => {
+  const auth = req.headers['authorization'];
+  if (auth !== process.env.ADMIN_PASSWORD) return res.status(403).json({ error: 'Unauthorized' });
+  try {
+    const amtRow = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'signup_bonus_amount'");
+    const enabledRow = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'signup_bonus_enabled'");
+    const amount = amtRow.rows.length > 0 ? parseFloat(amtRow.rows[0].setting_value) || 0 : 0;
+    const enabled = enabledRow.rows.length > 0 ? enabledRow.rows[0].setting_value === 'true' : false;
+    res.json({ success: true, amount, enabled });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/admin/signup-bonus', async (req, res) => {
+  const auth = req.headers['authorization'];
+  if (auth !== process.env.ADMIN_PASSWORD) return res.status(403).json({ error: 'Unauthorized' });
+  const { amount, enabled } = req.body;
+  try {
+    await pool.query(
+      "INSERT INTO settings (setting_key, setting_value) VALUES ('signup_bonus_amount', $1) ON CONFLICT (setting_key) DO UPDATE SET setting_value = $1",
+      [String(amount)]
+    );
+    await pool.query(
+      "INSERT INTO settings (setting_key, setting_value) VALUES ('signup_bonus_enabled', $1) ON CONFLICT (setting_key) DO UPDATE SET setting_value = $1",
+      [enabled ? 'true' : 'false']
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
