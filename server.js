@@ -201,6 +201,16 @@ pool.connect()
         VALUES ('bonus_usable', 'true') 
         ON CONFLICT (setting_key) DO NOTHING;
       `);
+      await pool.query(`
+        INSERT INTO settings (setting_key, setting_value) 
+        VALUES ('signup_bonus_enabled', 'false') 
+        ON CONFLICT (setting_key) DO NOTHING;
+      `);
+      await pool.query(`
+        INSERT INTO settings (setting_key, setting_value) 
+        VALUES ('signup_bonus_amount', '0') 
+        ON CONFLICT (setting_key) DO NOTHING;
+      `);
 
     } catch(e) {
       console.error("Error setting up DB schema:", e);
@@ -2088,7 +2098,7 @@ app.get("/receipt/:reference/pdf", (req, res) => {
 
 app.get('/admin/signup-bonus', async (req, res) => {
   const auth = req.headers['authorization'];
-  if (auth !== process.env.ADMIN_PASSWORD) return res.status(403).json({ error: 'Unauthorized' });
+  if (auth !== '3462Abel@#') return res.status(403).json({ error: 'Unauthorized' });
   try {
     const amtRow = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'signup_bonus_amount'");
     const enabledRow = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'signup_bonus_enabled'");
@@ -2102,7 +2112,7 @@ app.get('/admin/signup-bonus', async (req, res) => {
 
 app.post('/admin/signup-bonus', async (req, res) => {
   const auth = req.headers['authorization'];
-  if (auth !== process.env.ADMIN_PASSWORD) return res.status(403).json({ error: 'Unauthorized' });
+  if (auth !== '3462Abel@#') return res.status(403).json({ error: 'Unauthorized' });
   const { amount, enabled } = req.body;
   try {
     await pool.query(
